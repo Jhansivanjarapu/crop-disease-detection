@@ -1,0 +1,65 @@
+name: "Crop Disease Detection & Treatment Agent"
+version: "1.0.0"
+description: >
+  A simulated environment for detecting crop diseases and recommending treatments.
+  The agent observes crop conditions (leaf color, spots, humidity, temperature) and
+  must diagnose the disease and suggest appropriate treatment. Built on the OpenEnv
+  framework by Meta/PyTorch for real-world agricultural applications.
+
+env_class: "env.CropEnv"
+
+observation_model: "models.CropObservation"
+action_model: "models.CropAction"
+state_model: "models.CropState"
+
+action_space: discrete
+observation_type: dict
+
+reward_range: [-0.6, 0.8]
+
+endpoints:
+  reset: "/reset"
+  step: "/step"
+  state: "/state"
+  health: "/health"
+  web: "/ui"
+
+tasks:
+  - name: easy
+    description: "Binary classification — predict whether the crop is healthy or diseased."
+    grader: "grader.grade_easy"
+    score_range: [0.0, 1.0]
+
+  - name: medium
+    description: "Multi-class disease classification — predict healthy, leaf_blight, or rust."
+    grader: "grader.grade_medium"
+    score_range: [0.0, 1.0]
+
+  - name: hard
+    description: "Full pipeline — predict the disease and recommend the correct treatment."
+    grader: "grader.grade_hard"
+    score_range: [0.0, 1.0]
+
+actions:
+  - predict_healthy
+  - predict_leaf_blight
+  - predict_rust
+  - suggest_none
+  - suggest_pesticide_A
+  - suggest_pesticide_B
+
+observation_fields:
+  crop_type:
+    type: string
+    values: [tomato, potato, rice]
+  leaf_color:
+    type: string
+    values: [green, yellow, brown]
+  spots:
+    type: boolean
+  humidity:
+    type: integer
+    range: [0, 100]
+  temperature:
+    type: integer
+    range: [10, 40]

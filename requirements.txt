@@ -1,0 +1,6 @@
+openenv-core @ git+https://github.com/meta-pytorch/OpenEnv.git
+gradio
+fastapi
+uvicorn[standard]
+pydantic
+openai
