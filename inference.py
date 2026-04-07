@@ -12,7 +12,7 @@ import os
 import json
 import random
 from openai import OpenAI
-from grader import grade_easy, grade_medium, grade_hard
+from env import CropEnv
 
 # --- Configuration from environment variables ---
 API_BASE_URL = os.environ.get("API_BASE_URL", "https://api.groq.com/openai/v1")
@@ -178,29 +178,69 @@ def llm_predict_full(obs) -> dict:
         return {"disease": disease, "treatment": disease_to_treatment[disease]}
 
 
+def run_task(task_name, agent_fn, num_episodes=20):
+    """Run a single task with structured [START]/[STEP]/[END] output."""
+    print(f"[START] task={task_name}", flush=True)
+
+    total_score = 0.0
+    for step_num in range(1, num_episodes + 1):
+        env = CropEnv()
+        obs = env.reset()
+        prediction = agent_fn(obs)
+        true_disease = env.true_disease
+        true_treatment = env.true_treatment
+
+        if task_name == "easy":
+            if (prediction == 'healthy' and true_disease == 'healthy') or \
+               (prediction == 'diseased' and true_disease != 'healthy'):
+                reward = 0.4
+            else:
+                reward = -0.3
+            score = (reward + 0.3) / 0.7
+
+        elif task_name == "medium":
+            reward = 0.4 if prediction == true_disease else -0.3
+            score = (reward + 0.3) / 0.7
+
+        elif task_name == "hard":
+            reward = 0.0
+            if prediction['disease'] == true_disease:
+                reward += 0.4
+            else:
+                reward -= 0.3
+            if prediction['treatment'] == true_treatment:
+                reward += 0.4
+            else:
+                reward -= 0.3
+            score = (reward + 0.6) / 1.4
+        else:
+            reward = 0.0
+            score = 0.0
+
+        total_score += score
+        print(f"[STEP] step={step_num} reward={reward}", flush=True)
+
+    final_score = total_score / num_episodes
+    print(f"[END] task={task_name} score={final_score:.4f} steps={num_episodes}", flush=True)
+    return final_score
+
+
 def run_inference():
-    """Run all three tasks with the LLM agent and print scores."""
+    """Run all three tasks with the LLM agent and structured output."""
     random.seed(42)
 
-    print("=" * 50)
-    print("Crop Disease Detection — LLM Inference")
-    print(f"Model: {MODEL_NAME}")
-    print(f"API:   {API_BASE_URL}")
-    print("=" * 50)
+    print("=" * 50, flush=True)
+    print(f"Crop Disease Detection — LLM Inference", flush=True)
+    print(f"Model: {MODEL_NAME}", flush=True)
+    print(f"API:   {API_BASE_URL}", flush=True)
+    print("=" * 50, flush=True)
 
-    easy_score = grade_easy(llm_predict_binary)
-    print(f"\n[Easy Task]   Binary classification score: {easy_score:.4f}")
-
-    medium_score = grade_medium(llm_predict_disease)
-    print(f"[Medium Task] Disease classification score: {medium_score:.4f}")
-
-    hard_score = grade_hard(llm_predict_full)
-    print(f"[Hard Task]   Full pipeline score:          {hard_score:.4f}")
+    easy_score = run_task("easy", llm_predict_binary)
+    medium_score = run_task("medium", llm_predict_disease)
+    hard_score = run_task("hard", llm_predict_full)
 
     overall = (easy_score + medium_score + hard_score) / 3
-    print(f"\n{'=' * 50}")
-    print(f"Overall Score: {overall:.4f}")
-    print(f"{'=' * 50}")
+    print(f"\nOverall Score: {overall:.4f}", flush=True)
 
 
 if __name__ == "__main__":
