@@ -1,6 +1,7 @@
 """
 Inference script for Crop Disease Detection & Treatment Agent.
 Uses the OpenAI Client to call an LLM for disease prediction and treatment recommendation.
+Falls back to rule-based predictions if LLM is unavailable.
 
 Required environment variables:
     API_BASE_URL  — The API endpoint for the LLM.
@@ -9,9 +10,13 @@ Required environment variables:
 """
 
 import os
+import sys
 import json
 import random
-from openai import OpenAI
+
+# Force stdout to flush immediately
+sys.stdout.reconfigure(line_buffering=True)
+
 from env import CropEnv
 
 # --- Configuration from environment variables ---
@@ -19,17 +24,17 @@ API_BASE_URL = os.environ.get("API_BASE_URL", "https://api.groq.com/openai/v1")
 MODEL_NAME = os.environ.get("MODEL_NAME", "llama-3.1-8b-instant")
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
 
-if not API_BASE_URL or not MODEL_NAME or not HF_TOKEN:
-    raise RuntimeError(
-        "Missing required environment variables. "
-        "Please set API_BASE_URL, MODEL_NAME, and HF_TOKEN."
-    )
+# --- OpenAI Client setup (graceful if unavailable) ---
+client = None
+USE_LLM = False
 
-# --- OpenAI Client setup ---
-client = OpenAI(
-    base_url=API_BASE_URL,
-    api_key=HF_TOKEN,
-)
+try:
+    if API_BASE_URL and MODEL_NAME and HF_TOKEN:
+        from openai import OpenAI
+        client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
+        USE_LLM = True
+except Exception:
+    pass
 
 SYSTEM_PROMPT = """You are an expert agricultural AI agent specializing in crop disease detection and treatment.
 Given crop observations, you must analyze the symptoms and provide a diagnosis.
@@ -55,8 +60,8 @@ def obs_to_dict(obs) -> dict:
     return {'crop_type': 'tomato', 'leaf_color': 'green', 'spots': False, 'humidity': 50, 'temperature': 25}
 
 
-def rule_based_fallback(state: dict) -> str:
-    """Fallback rule-based prediction when LLM call fails."""
+def rule_based_predict(state: dict) -> str:
+    """Rule-based prediction used as primary or fallback."""
     if state.get('leaf_color') == 'yellow':
         return 'leaf_blight'
     elif state.get('spots'):
@@ -64,91 +69,11 @@ def rule_based_fallback(state: dict) -> str:
     return 'healthy'
 
 
-def llm_predict_binary(obs) -> str:
-    """Use the LLM to predict whether the crop is healthy or diseased."""
-    state = obs_to_dict(obs)
+def llm_call(user_prompt):
+    """Make an LLM API call. Returns response text or None on failure."""
+    if not USE_LLM or client is None:
+        return None
     try:
-        user_prompt = (
-            f"Observations: {json.dumps(state)}\n\n"
-            "Task: Is this crop healthy or diseased?\n"
-            "Respond with ONLY a JSON object: {\"prediction\": \"healthy\"} or {\"prediction\": \"diseased\"}"
-        )
-        response = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.1,
-            max_tokens=50,
-        )
-        text = response.choices[0].message.content.strip()
-        try:
-            result = json.loads(text)
-            prediction = result.get("prediction", "healthy")
-            return prediction if prediction in ("healthy", "diseased") else "healthy"
-        except json.JSONDecodeError:
-            if "diseased" in text.lower():
-                return "diseased"
-            return "healthy"
-    except Exception as e:
-        print(f"  [Warning] LLM call failed for easy task: {e}")
-        fallback = rule_based_fallback(state)
-        return "healthy" if fallback == "healthy" else "diseased"
-
-
-def llm_predict_disease(obs) -> str:
-    """Use the LLM to predict the specific disease."""
-    state = obs_to_dict(obs)
-    try:
-        user_prompt = (
-            f"Observations: {json.dumps(state)}\n\n"
-            "Task: What disease does this crop have?\n"
-            "Respond with ONLY a JSON object: {\"disease\": \"<disease>\"}\n"
-            "where <disease> is one of: healthy, leaf_blight, rust"
-        )
-        response = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.1,
-            max_tokens=50,
-        )
-        text = response.choices[0].message.content.strip()
-        valid_diseases = ("healthy", "leaf_blight", "rust")
-        try:
-            result = json.loads(text)
-            disease = result.get("disease", "healthy")
-            return disease if disease in valid_diseases else "healthy"
-        except json.JSONDecodeError:
-            for d in valid_diseases:
-                if d in text.lower():
-                    return d
-            return "healthy"
-    except Exception as e:
-        print(f"  [Warning] LLM call failed for medium task: {e}")
-        return rule_based_fallback(state)
-
-
-def llm_predict_full(obs) -> dict:
-    """Use the LLM to predict disease and recommend treatment."""
-    state = obs_to_dict(obs)
-    disease_to_treatment = {
-        'healthy': 'none',
-        'leaf_blight': 'pesticide_A',
-        'rust': 'pesticide_B',
-    }
-    try:
-        user_prompt = (
-            f"Observations: {json.dumps(state)}\n\n"
-            "Task: Diagnose the disease and recommend a treatment.\n"
-            "Respond with ONLY a JSON object:\n"
-            "{\"disease\": \"<disease>\", \"treatment\": \"<treatment>\"}\n"
-            "where <disease> is one of: healthy, leaf_blight, rust\n"
-            "and <treatment> is one of: none, pesticide_A, pesticide_B"
-        )
         response = client.chat.completions.create(
             model=MODEL_NAME,
             messages=[
@@ -158,24 +83,84 @@ def llm_predict_full(obs) -> dict:
             temperature=0.1,
             max_tokens=100,
         )
-        text = response.choices[0].message.content.strip()
-        valid_diseases = ("healthy", "leaf_blight", "rust")
-        valid_treatments = ("none", "pesticide_A", "pesticide_B")
+        return response.choices[0].message.content.strip()
+    except Exception:
+        return None
+
+
+def predict_binary(obs) -> str:
+    """Predict whether the crop is healthy or diseased."""
+    state = obs_to_dict(obs)
+    text = llm_call(
+        f"Observations: {json.dumps(state)}\n\n"
+        "Task: Is this crop healthy or diseased?\n"
+        "Respond with ONLY a JSON object: {\"prediction\": \"healthy\"} or {\"prediction\": \"diseased\"}"
+    )
+    if text:
+        try:
+            result = json.loads(text)
+            p = result.get("prediction", "healthy")
+            if p in ("healthy", "diseased"):
+                return p
+        except (json.JSONDecodeError, AttributeError):
+            if "diseased" in text.lower():
+                return "diseased"
+    # Fallback
+    fb = rule_based_predict(state)
+    return "healthy" if fb == "healthy" else "diseased"
+
+
+def predict_disease(obs) -> str:
+    """Predict the specific disease."""
+    state = obs_to_dict(obs)
+    valid = ("healthy", "leaf_blight", "rust")
+    text = llm_call(
+        f"Observations: {json.dumps(state)}\n\n"
+        "Task: What disease does this crop have?\n"
+        "Respond with ONLY a JSON object: {\"disease\": \"<disease>\"}\n"
+        "where <disease> is one of: healthy, leaf_blight, rust"
+    )
+    if text:
+        try:
+            result = json.loads(text)
+            d = result.get("disease", "healthy")
+            if d in valid:
+                return d
+        except (json.JSONDecodeError, AttributeError):
+            for d in valid:
+                if d in text.lower():
+                    return d
+    return rule_based_predict(state)
+
+
+def predict_full(obs) -> dict:
+    """Predict disease and recommend treatment."""
+    state = obs_to_dict(obs)
+    dt = {'healthy': 'none', 'leaf_blight': 'pesticide_A', 'rust': 'pesticide_B'}
+    valid_d = ("healthy", "leaf_blight", "rust")
+    valid_t = ("none", "pesticide_A", "pesticide_B")
+    text = llm_call(
+        f"Observations: {json.dumps(state)}\n\n"
+        "Task: Diagnose the disease and recommend a treatment.\n"
+        "Respond with ONLY a JSON object:\n"
+        "{\"disease\": \"<disease>\", \"treatment\": \"<treatment>\"}\n"
+        "where <disease> is one of: healthy, leaf_blight, rust\n"
+        "and <treatment> is one of: none, pesticide_A, pesticide_B"
+    )
+    if text:
         try:
             result = json.loads(text)
             disease = result.get("disease", "healthy")
             treatment = result.get("treatment", "none")
-            if disease not in valid_diseases:
+            if disease not in valid_d:
                 disease = "healthy"
-            if treatment not in valid_treatments:
-                treatment = "none"
+            if treatment not in valid_t:
+                treatment = dt.get(disease, "none")
             return {"disease": disease, "treatment": treatment}
-        except json.JSONDecodeError:
-            return {"disease": "healthy", "treatment": "none"}
-    except Exception as e:
-        print(f"  [Warning] LLM call failed for hard task: {e}")
-        disease = rule_based_fallback(state)
-        return {"disease": disease, "treatment": disease_to_treatment[disease]}
+        except (json.JSONDecodeError, AttributeError):
+            pass
+    disease = rule_based_predict(state)
+    return {"disease": disease, "treatment": dt[disease]}
 
 
 def run_task(task_name, agent_fn, num_episodes=20):
@@ -226,18 +211,19 @@ def run_task(task_name, agent_fn, num_episodes=20):
 
 
 def run_inference():
-    """Run all three tasks with the LLM agent and structured output."""
+    """Run all three tasks with structured output."""
     random.seed(42)
 
     print("=" * 50, flush=True)
-    print(f"Crop Disease Detection — LLM Inference", flush=True)
+    print("Crop Disease Detection - LLM Inference", flush=True)
     print(f"Model: {MODEL_NAME}", flush=True)
     print(f"API:   {API_BASE_URL}", flush=True)
+    print(f"LLM Available: {USE_LLM}", flush=True)
     print("=" * 50, flush=True)
 
-    easy_score = run_task("easy", llm_predict_binary)
-    medium_score = run_task("medium", llm_predict_disease)
-    hard_score = run_task("hard", llm_predict_full)
+    easy_score = run_task("easy", predict_binary)
+    medium_score = run_task("medium", predict_disease)
+    hard_score = run_task("hard", predict_full)
 
     overall = (easy_score + medium_score + hard_score) / 3
     print(f"\nOverall Score: {overall:.4f}", flush=True)
