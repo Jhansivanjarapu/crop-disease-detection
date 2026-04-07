@@ -49,104 +49,133 @@ def obs_to_dict(obs) -> dict:
     """Convert a CropObservation model to a plain dict for the LLM."""
     if hasattr(obs, 'model_dump'):
         data = obs.model_dump()
-        # Only include crop-relevant fields
         return {k: data[k] for k in ['crop_type', 'leaf_color', 'spots', 'humidity', 'temperature'] if k in data}
-    return obs
+    if isinstance(obs, dict):
+        return obs
+    return {'crop_type': 'tomato', 'leaf_color': 'green', 'spots': False, 'humidity': 50, 'temperature': 25}
+
+
+def rule_based_fallback(state: dict) -> str:
+    """Fallback rule-based prediction when LLM call fails."""
+    if state.get('leaf_color') == 'yellow':
+        return 'leaf_blight'
+    elif state.get('spots'):
+        return 'rust'
+    return 'healthy'
 
 
 def llm_predict_binary(obs) -> str:
     """Use the LLM to predict whether the crop is healthy or diseased."""
     state = obs_to_dict(obs)
-    user_prompt = (
-        f"Observations: {json.dumps(state)}\n\n"
-        "Task: Is this crop healthy or diseased?\n"
-        "Respond with ONLY a JSON object: {\"prediction\": \"healthy\"} or {\"prediction\": \"diseased\"}"
-    )
-    response = client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=0.1,
-        max_tokens=50,
-    )
-    text = response.choices[0].message.content.strip()
     try:
-        result = json.loads(text)
-        prediction = result.get("prediction", "healthy")
-        return prediction if prediction in ("healthy", "diseased") else "healthy"
-    except json.JSONDecodeError:
-        if "diseased" in text.lower():
-            return "diseased"
-        return "healthy"
+        user_prompt = (
+            f"Observations: {json.dumps(state)}\n\n"
+            "Task: Is this crop healthy or diseased?\n"
+            "Respond with ONLY a JSON object: {\"prediction\": \"healthy\"} or {\"prediction\": \"diseased\"}"
+        )
+        response = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.1,
+            max_tokens=50,
+        )
+        text = response.choices[0].message.content.strip()
+        try:
+            result = json.loads(text)
+            prediction = result.get("prediction", "healthy")
+            return prediction if prediction in ("healthy", "diseased") else "healthy"
+        except json.JSONDecodeError:
+            if "diseased" in text.lower():
+                return "diseased"
+            return "healthy"
+    except Exception as e:
+        print(f"  [Warning] LLM call failed for easy task: {e}")
+        fallback = rule_based_fallback(state)
+        return "healthy" if fallback == "healthy" else "diseased"
 
 
 def llm_predict_disease(obs) -> str:
     """Use the LLM to predict the specific disease."""
     state = obs_to_dict(obs)
-    user_prompt = (
-        f"Observations: {json.dumps(state)}\n\n"
-        "Task: What disease does this crop have?\n"
-        "Respond with ONLY a JSON object: {\"disease\": \"<disease>\"}\n"
-        "where <disease> is one of: healthy, leaf_blight, rust"
-    )
-    response = client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=0.1,
-        max_tokens=50,
-    )
-    text = response.choices[0].message.content.strip()
-    valid_diseases = ("healthy", "leaf_blight", "rust")
     try:
-        result = json.loads(text)
-        disease = result.get("disease", "healthy")
-        return disease if disease in valid_diseases else "healthy"
-    except json.JSONDecodeError:
-        for d in valid_diseases:
-            if d in text.lower():
-                return d
-        return "healthy"
+        user_prompt = (
+            f"Observations: {json.dumps(state)}\n\n"
+            "Task: What disease does this crop have?\n"
+            "Respond with ONLY a JSON object: {\"disease\": \"<disease>\"}\n"
+            "where <disease> is one of: healthy, leaf_blight, rust"
+        )
+        response = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.1,
+            max_tokens=50,
+        )
+        text = response.choices[0].message.content.strip()
+        valid_diseases = ("healthy", "leaf_blight", "rust")
+        try:
+            result = json.loads(text)
+            disease = result.get("disease", "healthy")
+            return disease if disease in valid_diseases else "healthy"
+        except json.JSONDecodeError:
+            for d in valid_diseases:
+                if d in text.lower():
+                    return d
+            return "healthy"
+    except Exception as e:
+        print(f"  [Warning] LLM call failed for medium task: {e}")
+        return rule_based_fallback(state)
 
 
 def llm_predict_full(obs) -> dict:
     """Use the LLM to predict disease and recommend treatment."""
     state = obs_to_dict(obs)
-    user_prompt = (
-        f"Observations: {json.dumps(state)}\n\n"
-        "Task: Diagnose the disease and recommend a treatment.\n"
-        "Respond with ONLY a JSON object:\n"
-        "{\"disease\": \"<disease>\", \"treatment\": \"<treatment>\"}\n"
-        "where <disease> is one of: healthy, leaf_blight, rust\n"
-        "and <treatment> is one of: none, pesticide_A, pesticide_B"
-    )
-    response = client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=0.1,
-        max_tokens=100,
-    )
-    text = response.choices[0].message.content.strip()
-    valid_diseases = ("healthy", "leaf_blight", "rust")
-    valid_treatments = ("none", "pesticide_A", "pesticide_B")
+    disease_to_treatment = {
+        'healthy': 'none',
+        'leaf_blight': 'pesticide_A',
+        'rust': 'pesticide_B',
+    }
     try:
-        result = json.loads(text)
-        disease = result.get("disease", "healthy")
-        treatment = result.get("treatment", "none")
-        if disease not in valid_diseases:
-            disease = "healthy"
-        if treatment not in valid_treatments:
-            treatment = "none"
-        return {"disease": disease, "treatment": treatment}
-    except json.JSONDecodeError:
-        return {"disease": "healthy", "treatment": "none"}
+        user_prompt = (
+            f"Observations: {json.dumps(state)}\n\n"
+            "Task: Diagnose the disease and recommend a treatment.\n"
+            "Respond with ONLY a JSON object:\n"
+            "{\"disease\": \"<disease>\", \"treatment\": \"<treatment>\"}\n"
+            "where <disease> is one of: healthy, leaf_blight, rust\n"
+            "and <treatment> is one of: none, pesticide_A, pesticide_B"
+        )
+        response = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.1,
+            max_tokens=100,
+        )
+        text = response.choices[0].message.content.strip()
+        valid_diseases = ("healthy", "leaf_blight", "rust")
+        valid_treatments = ("none", "pesticide_A", "pesticide_B")
+        try:
+            result = json.loads(text)
+            disease = result.get("disease", "healthy")
+            treatment = result.get("treatment", "none")
+            if disease not in valid_diseases:
+                disease = "healthy"
+            if treatment not in valid_treatments:
+                treatment = "none"
+            return {"disease": disease, "treatment": treatment}
+        except json.JSONDecodeError:
+            return {"disease": "healthy", "treatment": "none"}
+    except Exception as e:
+        print(f"  [Warning] LLM call failed for hard task: {e}")
+        disease = rule_based_fallback(state)
+        return {"disease": disease, "treatment": disease_to_treatment[disease]}
 
 
 def run_inference():
